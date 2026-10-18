@@ -30,3 +30,10 @@ experiments/data/*.bin
 
 # Test artifacts
 tests/tmp/
+
+# partial downloads from the assembler + peer download dirs
+*.part
+downloads/
+
+# local helper scripts
+push_now.bat
