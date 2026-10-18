@@ -23,13 +23,9 @@ logger = logging.getLogger('client')
 
 
 class PeerClient:
-    """
-    Main client that a user runs. Handles:
-    - Tracker communication
-    - Accepting incoming connections
-    - Connecting to peers
-    - Coordinating piece downloads
-    """
+    """The thing a user actually runs - talks to the tracker, accepts/opens
+    connections to other peers, and keeps the download (or upload, if we're
+    seeding) moving."""
 
     def __init__(self, torrent_path, download_dir='.', listen_port=6881,
                  peer_id=None, piece_selector=None, choking_manager=None,

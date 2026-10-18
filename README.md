@@ -2,8 +2,6 @@
 
 **CS-30003 · Coding Assignment 1**
 
-A BitTorrent-lite peer-to-peer file distribution system built from the socket level in Python.
-
 ## Team
 
 | Member | Name | Roll No |
@@ -15,53 +13,66 @@ A BitTorrent-lite peer-to-peer file distribution system built from the socket le
 
 **Section:** 33
 
-## Architecture
+## What this is
 
-The system consists of three core components:
+Our own stripped-down BitTorrent, built from raw sockets up — no torrent
+library, no HTTP library for the tracker (that's just a raw TCP server
+that parses `GET /announce?...` by hand). Three pieces:
 
-1. **Metainfo Generator** — Splits files into fixed-size pieces and produces per-piece SHA-256 hashes in a Bencode-like binary format.
-2. **Tracker Server** — Maintains swarm membership and serves peer lists over a custom HTTP interface built on raw TCP sockets.
-3. **Peer Client** — Implements a wire protocol (handshake, bitfield, have, request, piece, cancel) over TCP sockets for concurrent multi-peer file transfer.
+- **Metainfo** (`src/metainfo`) — splits a file into fixed-size pieces,
+  hashes each one with SHA-256, and writes/reads the bencoded `.torrent`
+  file. Also where the piece-by-piece assembler on the download side lives.
+- **Tracker** (`src/tracker`) — keeps track of who's in the swarm for a
+  given info_hash and hands back a peer list on announce.
+- **Peer** (`src/peer`) — the actual wire protocol (handshake, bitfield,
+  have, request/piece, cancel) plus the client that runs multiple peer
+  connections concurrently with asyncio.
 
-## Features
+`src/strategy` has the piece-selection algorithms (rarest-first, random,
+sequential) and the choking/unchoking logic, kept separate from the peer
+code so we could swap strategies in and out for the experiment without
+touching the protocol stuff.
 
-- Configurable piece sizes with per-piece SHA-256 hash verification
-- Tracker server with peer registration, announce, and swarm state management
-- Full peer wire protocol: handshake, bitfield, have, request/piece/cancel
-- Rarest-first piece selection with random fallback and request pipelining
-- Multi-peer operation: ≥6 concurrent peers with async state machines (Python asyncio)
-- Basic choking/unchoking mechanism for upload management and free-rider handling
-- End-to-end integrity: SHA-256 verification of reassembled files
+Everything downloaded gets re-hashed piece by piece as it arrives, and
+once a file is complete we also check the whole-file SHA-256 against
+what's in the torrent, just to be sure nothing got corrupted on the way.
 
-## Tech Stack
+## Running it
 
-- **Python 3.12** — asyncio, hashlib, struct
-- **matplotlib + pandas** — Experiment plots and analysis
+```
+python -m src.metainfo mkfile data/test.bin 10M --seed 1
+python -m src.metainfo create data/test.bin -t http://127.0.0.1:8000
+python -m src.tracker.tracker
+python -m tests.test_e2e        # spins up a tracker + seeder + 2 leechers locally
+```
 
-## Project Structure
+## Project layout
 
 ```
 bittorrent-lite/
 ├── src/
-│   ├── metainfo/        # Metainfo format, file splitter/assembler, hashing
-│   ├── tracker/         # Tracker server (raw TCP HTTP, announce, swarm state)
-│   ├── peer/            # Peer wire protocol (message framing, handshake, state machine)
-│   └── strategy/        # Piece selection algorithms, choking logic
-├── experiments/         # Experiment harness, configs, results
-├── docs/               # Protocol specification, design docs
-├── tests/              # Unit and integration tests
+│   ├── metainfo/        # torrent file format, splitting, hashing, assembler
+│   ├── tracker/         # raw-socket HTTP tracker, swarm state
+│   ├── peer/            # wire protocol, connection state machine, client
+│   └── strategy/        # piece selection + choking
+├── experiments/         # experiment runner + plots
+├── docs/                 # protocol notes
+├── tests/
 └── README.md
 ```
 
 ## Experiment
 
-**Hypothesis:** Rarest-first piece selection reduces total swarm distribution time compared with random and sequential selection, particularly as swarm size increases.
+What we actually wanted to check: does rarest-first spread pieces around
+the swarm faster than picking randomly or just going in order, and does
+that gap get bigger as the swarm grows. Ran it with a 100 MB file split
+into 256 KB pieces, swarm sizes of 6 and 8, 1 or 2 seeders, 5 runs per
+config to smooth out the noise between runs. There's also a separate
+run with 2 free-riding leechers mixed in to see whether the choking
+logic actually stops them from leeching for free.
 
-- **File:** 100 MB, 256 KB piece size
-- **Configurations:** Swarm size (6, 8 peers) × Seeder count (1, 2) × Strategy (rarest-first, random, sequential)
-- **Runs:** 5 per configuration
-- **DVs:** Total distribution time, per-peer completion time, piece availability variance
-- **Free-rider experiment:** 2 free-rider peers to evaluate choking effectiveness
+Results/plots go in `experiments/results/` (not committed, they're
+regenerated by `experiments/experiment.py` + `plot_results.py`).
 
 ## License
 

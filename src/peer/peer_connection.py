@@ -19,10 +19,9 @@ logger = logging.getLogger('peer')
 
 
 class PeerConnection:
-    """
-    Represents one connection to a remote peer.
-    Each peer has its own state: am_choking, am_interested, etc.
-    """
+    """One TCP connection to one peer. Every peer gets its own instance, its
+    own am_choking/am_interested flags, its own pending request set, etc -
+    nothing here is shared between peers."""
 
     def __init__(self, peer_id, info_hash, assembler, piece_provider=None,
                  on_piece_complete=None, piece_selector=None, choking_manager=None,
