@@ -286,6 +286,8 @@ class PeerClient:
             'port': self.listen_port,
             'uploaded': sum(c.bytes_uploaded for c in self.connections.values()),
             'downloaded': sum(c.bytes_downloaded for c in self.connections.values()),
+            # tracker uses left == 0 to count us as a seeder
+            'left': self.assembler.bytes_left,
         }
         if event:
             params['event'] = event

@@ -42,7 +42,8 @@ what's in the torrent, just to be sure nothing got corrupted on the way.
 ```
 python -m src.metainfo mkfile data/test.bin 10M --seed 1
 python -m src.metainfo create data/test.bin -t http://127.0.0.1:8000
-python -m src.tracker.tracker
+python -m src.tracker --port 8000
+python -m tests.test_tracker    # tracker unit + socket tests
 python -m tests.test_e2e        # spins up a tracker + seeder + 2 leechers locally
 ```
 

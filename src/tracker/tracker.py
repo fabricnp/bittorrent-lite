@@ -1,65 +1,125 @@
-"""
-tracker.py - Simple HTTP tracker built on raw TCP sockets.
+# tracker.py
+# Member B (Pravesh) - the tracker server.
+#
+# Its a tiny HTTP server written on top of asyncio TCP sockets (no http
+# library). Peers send GET /announce with their info_hash, peer_id and
+# port, we remember them in a Swarm and send back a list of the other
+# peers as JSON. Endpoints:
+#
+#   GET /announce?info_hash=..&peer_id=..&port=..[&event=..&left=..&numwant=..]
+#   GET /scrape?info_hash=..      -> seeders / leechers count for one swarm
+#   GET /stats                    -> everything the tracker knows (debugging)
+#
+# How to run it:
+#   python -m src.tracker.tracker
+#   python -m src.tracker.tracker --host 0.0.0.0 --port 8000 --interval 30
 
-Handles peer registration and announce requests.
-Peers hit /announce with their info_hash, peer_id, port, etc.
-Tracker responds with a list of peers in the swarm.
-
-No external HTTP libraries - we parse HTTP manually.
-"""
-
+import argparse
 import asyncio
 import json
-import time
-import urllib.parse
+
+from .http_request import read_request_head, parse_request, BadRequest
+from .swarm import Swarm
+
+
+STATUS_TEXT = {
+    200: 'OK',
+    400: 'Bad Request',
+    404: 'Not Found',
+    405: 'Method Not Allowed',
+    414: 'URI Too Long',
+    431: 'Request Header Fields Too Large',
+    500: 'Internal Server Error',
+    505: 'HTTP Version Not Supported',
+}
+
+VALID_EVENTS = ['', 'started', 'completed', 'stopped']
+DEFAULT_NUMWANT = 50
+MAX_NUMWANT = 200
 
 
 class TrackerServer:
-    """
-    Tracker that maintains swarm state and responds to announces.
-    Runs as an asyncio TCP server.
-    """
 
-    def __init__(self, host='127.0.0.1', port=8000):
+    def __init__(self, host='127.0.0.1', port=8000, interval=30, peer_timeout=120,
+                 cleanup_every=30, verbose=True):
         self.host = host
         self.port = port
-        # swarm state: info_hash -> {peer_id: {ip, port, last_seen, uploaded, downloaded}}
-        self.swarms = {}
+        # how often (seconds) we tell peers to announce again
+        self.interval = interval
+        # if a peer is quiet for this long we treat it as dead
+        self.peer_timeout = peer_timeout
+        # how often the background cleanup runs
+        self.cleanup_every = cleanup_every
+        self.verbose = verbose
+
+        self.swarms = {}   # info_hash (hex string) -> Swarm
         self.server = None
-        self.peer_timeout = 120  # seconds before a peer is considered dead
+        self.cleanup_task = None
+
+        # small counters, shown in /stats
+        self.total_announces = 0
+        self.total_bad_requests = 0
+
+    def log(self, msg):
+        if self.verbose:
+            print('[tracker] ' + msg)
 
     async def start(self):
-        """Start the tracker server."""
-        self.server = await asyncio.start_server(
-            self._handle_connection, self.host, self.port
-        )
-        print(f"[tracker] Listening on {self.host}:{self.port}")
+        self.server = await asyncio.start_server(self.handle_client, self.host, self.port)
+        self.cleanup_task = asyncio.create_task(self.cleanup_loop())
+        self.log('Listening on %s:%d' % (self.host, self.port))
 
     async def stop(self):
-        """Shut down the tracker."""
-        if self.server:
+        if self.cleanup_task is not None:
+            self.cleanup_task.cancel()
+            try:
+                await self.cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self.cleanup_task = None
+
+        if self.server is not None:
             self.server.close()
             await self.server.wait_closed()
-            print("[tracker] Stopped")
+            self.server = None
+            self.log('Stopped')
 
-    async def _handle_connection(self, reader, writer):
-        """Handle an incoming TCP connection."""
+    # ---------- connection handling ----------
+
+    async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        if addr:
+            client_ip = addr[0]
+        else:
+            client_ip = '127.0.0.1'
+
         try:
-            # read the HTTP request (we only expect small requests)
-            raw = await asyncio.wait_for(reader.read(4096), timeout=10)
-            if not raw:
+            try:
+                head = await read_request_head(reader)
+                if head is None:
+                    # they connected and left without sending anything
+                    return
+                request = parse_request(head)
+                status, body = self.route(request, client_ip)
+            except BadRequest as e:
+                self.total_bad_requests = self.total_bad_requests + 1
+                status = e.status
+                body = {'failure reason': e.message}
+            except asyncio.TimeoutError:
+                # too slow, just hang up
                 return
 
-            request_text = raw.decode('utf-8', errors='replace')
-            response = self._process_request(request_text, addr)
-            writer.write(response)
+            writer.write(self.build_response(status, body))
             await writer.drain()
 
-        except asyncio.TimeoutError:
-            pass
         except Exception as e:
-            print(f"[tracker] Error from {addr}: {e}")
+            # something we didnt expect, try to tell the client at least
+            self.log('error with %s: %s' % (str(addr), str(e)))
+            try:
+                writer.write(self.build_response(500, {'failure reason': 'internal error'}))
+                await writer.drain()
+            except Exception:
+                pass
         finally:
             writer.close()
             try:
@@ -67,178 +127,208 @@ class TrackerServer:
             except Exception:
                 pass
 
-    def _process_request(self, request_text, addr):
-        """Parse HTTP request and route to handler."""
-        lines = request_text.split('\r\n')
-        if not lines:
-            return self._http_response(400, {'error': 'empty request'})
+    def route(self, request, client_ip):
+        # decide which handler gets the request
+        if request.method != 'GET':
+            return 405, {'failure reason': 'only GET is supported'}
 
-        # parse request line: GET /announce?params HTTP/1.1
-        parts = lines[0].split(' ')
-        if len(parts) < 2:
-            return self._http_response(400, {'error': 'malformed request'})
+        if request.path == '/announce':
+            return self.handle_announce(request.query, client_ip)
+        if request.path == '/scrape':
+            return self.handle_scrape(request.query)
+        if request.path == '/stats':
+            return self.handle_stats()
+        return 404, {'failure reason': 'unknown path ' + request.path}
 
-        method = parts[0]
-        path = parts[1]
+    def build_response(self, status, body):
+        body_bytes = json.dumps(body).encode('utf-8')
+        text = STATUS_TEXT.get(status, 'Error')
 
-        if method != 'GET':
-            return self._http_response(405, {'error': 'only GET supported'})
+        head = 'HTTP/1.1 ' + str(status) + ' ' + text + '\r\n'
+        head = head + 'Content-Type: application/json\r\n'
+        head = head + 'Content-Length: ' + str(len(body_bytes)) + '\r\n'
+        if status == 405:
+            head = head + 'Allow: GET\r\n'
+        head = head + 'Connection: close\r\n'
+        head = head + '\r\n'
+        return head.encode('ascii') + body_bytes
 
-        if path.startswith('/announce'):
-            return self._handle_announce(path, addr)
-        elif path.startswith('/scrape'):
-            return self._handle_scrape(path)
-        elif path == '/stats':
-            return self._handle_stats()
-        else:
-            return self._http_response(404, {'error': 'not found'})
+    # ---------- endpoints ----------
 
-    def _handle_announce(self, path, addr):
-        """
-        Handle /announce requests.
+    def handle_announce(self, params, client_ip):
+        # check all the params first, any problem -> 400
+        info_hash = check_info_hash(params.get('info_hash'))
 
-        Expected params:
-            info_hash - hex string identifying the torrent
-            peer_id   - unique id of the peer
-            port      - port the peer is listening on
-            event     - started/stopped/completed (optional)
-            uploaded  - bytes uploaded (optional)
-            downloaded - bytes downloaded (optional)
-        """
-        params = self._parse_query(path)
-
-        info_hash = params.get('info_hash')
         peer_id = params.get('peer_id')
-        port = params.get('port')
+        if peer_id is None or peer_id == '':
+            raise BadRequest(400, 'missing peer_id')
+        if len(peer_id) > 64:
+            raise BadRequest(400, 'peer_id too long')
 
-        if not all([info_hash, peer_id, port]):
-            return self._http_response(400, {
-                'error': 'missing required params (info_hash, peer_id, port)'
-            })
-
-        try:
-            port = int(port)
-        except ValueError:
-            return self._http_response(400, {'error': 'port must be integer'})
+        port = read_int(params, 'port', None)
+        if port is None:
+            raise BadRequest(400, 'missing port')
+        if port < 1 or port > 65535:
+            raise BadRequest(400, 'port must be between 1 and 65535')
 
         event = params.get('event', '')
-        peer_ip = addr[0] if addr else '127.0.0.1'
+        if event not in VALID_EVENTS:
+            raise BadRequest(400, 'unknown event ' + event)
 
-        # init swarm if needed
-        if info_hash not in self.swarms:
-            self.swarms[info_hash] = {}
+        uploaded = read_int(params, 'uploaded', 0)
+        downloaded = read_int(params, 'downloaded', 0)
+        left = read_int(params, 'left', None)
 
-        swarm = self.swarms[info_hash]
+        numwant = read_int(params, 'numwant', DEFAULT_NUMWANT)
+        if numwant > MAX_NUMWANT:
+            numwant = MAX_NUMWANT
 
-        if event == 'stopped':
-            # peer is leaving
-            swarm.pop(peer_id, None)
-            print(f"[tracker] Peer {peer_id} left swarm {info_hash[:12]}...")
-        else:
-            # register or update peer
-            swarm[peer_id] = {
-                'ip': peer_ip,
-                'port': port,
-                'last_seen': time.time(),
-                'uploaded': int(params.get('uploaded', 0)),
-                'downloaded': int(params.get('downloaded', 0)),
-            }
-            if event == 'started':
-                print(f"[tracker] Peer {peer_id} joined swarm {info_hash[:12]}...")
-            elif event == 'completed':
-                print(f"[tracker] Peer {peer_id} completed download in swarm {info_hash[:12]}...")
+        self.total_announces = self.total_announces + 1
 
-        # clean out dead peers
-        self._cleanup_swarm(info_hash)
+        # get the swarm, make it if its the first peer for this torrent.
+        # (no point making a swarm just for someone who is leaving)
+        swarm = self.swarms.get(info_hash)
+        if swarm is None:
+            if event == 'stopped':
+                return 200, self.announce_reply(None, [])
+            swarm = Swarm(info_hash)
+            self.swarms[info_hash] = swarm
 
-        # build peer list (exclude the requesting peer)
-        peers = []
-        for pid, pinfo in swarm.items():
-            if pid != peer_id:
-                peers.append({
-                    'peer_id': pid,
-                    'ip': pinfo['ip'],
-                    'port': pinfo['port'],
-                })
+        was_seeder = peer_id in swarm.peers and swarm.peers[peer_id].is_seeder
+        still_in = swarm.announce(peer_id, client_ip, port, event,
+                                  uploaded, downloaded, left)
 
-        response_data = {
-            'interval': 30,  # re-announce interval in seconds
-            'peers': peers,
-            'complete': len(swarm),  # total peers in swarm
+        short = info_hash[:12]
+        if not still_in:
+            self.log('Peer %s left swarm %s...' % (peer_id, short))
+            if swarm.is_empty():
+                del self.swarms[info_hash]
+            return 200, self.announce_reply(swarm, [])
+
+        if event == 'started':
+            self.log('Peer %s joined swarm %s...' % (peer_id, short))
+        elif event == 'completed' or (swarm.peers[peer_id].is_seeder and not was_seeder):
+            self.log('Peer %s is now seeding in swarm %s...' % (peer_id, short))
+
+        peer_list = swarm.get_peer_list(exclude_peer_id=peer_id, numwant=numwant)
+        return 200, self.announce_reply(swarm, peer_list)
+
+    def announce_reply(self, swarm, peer_list):
+        seeders = 0
+        leechers = 0
+        if swarm is not None:
+            seeders = swarm.count_seeders()
+            leechers = swarm.count_leechers()
+        return {
+            'interval': self.interval,
+            'min interval': self.interval // 2,
+            'complete': seeders,      # number of seeders
+            'incomplete': leechers,   # number of leechers
+            'peers': peer_list,
         }
 
-        return self._http_response(200, response_data)
+    def handle_scrape(self, params):
+        info_hash = check_info_hash(params.get('info_hash'))
+        swarm = self.swarms.get(info_hash)
+        if swarm is None:
+            return 200, {'info_hash': info_hash, 'complete': 0, 'incomplete': 0,
+                         'downloaded': 0, 'peers': 0}
 
-    def _handle_scrape(self, path):
-        """Return basic stats about a swarm."""
-        params = self._parse_query(path)
-        info_hash = params.get('info_hash')
-
-        if not info_hash:
-            return self._http_response(400, {'error': 'need info_hash'})
-
-        swarm = self.swarms.get(info_hash, {})
-        self._cleanup_swarm(info_hash)
-
-        return self._http_response(200, {
+        # clean first, so the numbers we report are up to date
+        swarm.remove_dead_peers(self.peer_timeout)
+        return 200, {
             'info_hash': info_hash,
-            'peers': len(swarm),
-        })
+            'complete': swarm.count_seeders(),
+            'incomplete': swarm.count_leechers(),
+            'downloaded': swarm.times_completed,
+            'peers': len(swarm.peers),
+        }
 
-    def _handle_stats(self):
-        """Return overall tracker stats."""
-        stats = {}
-        for ih, swarm in self.swarms.items():
-            stats[ih] = {
-                'peers': len(swarm),
-                'peer_ids': list(swarm.keys()),
+    def handle_stats(self):
+        swarms_info = {}
+        for ih in self.swarms:
+            swarm = self.swarms[ih]
+            swarms_info[ih] = {
+                'peers': len(swarm.peers),
+                'seeders': swarm.count_seeders(),
+                'leechers': swarm.count_leechers(),
+                'peer_ids': list(swarm.peers.keys()),
             }
-        return self._http_response(200, {'swarms': stats})
+        return 200, {
+            'swarms': swarms_info,
+            'total_announces': self.total_announces,
+            'bad_requests': self.total_bad_requests,
+        }
 
-    def _cleanup_swarm(self, info_hash):
-        """Remove peers that haven't announced recently."""
-        if info_hash not in self.swarms:
-            return
-        now = time.time()
-        swarm = self.swarms[info_hash]
-        dead = [pid for pid, p in swarm.items()
-                if now - p['last_seen'] > self.peer_timeout]
-        for pid in dead:
-            del swarm[pid]
-            print(f"[tracker] Timed out peer {pid}")
+    # ---------- cleanup ----------
 
-    def _parse_query(self, path):
-        """Extract query parameters from URL path."""
-        if '?' not in path:
-            return {}
-        query_string = path.split('?', 1)[1]
-        return dict(urllib.parse.parse_qsl(query_string))
+    def cleanup_now(self, now=None):
+        # remove dead peers from every swarm, and remove swarms that are empty
+        empty = []
+        for ih in self.swarms:
+            dead = self.swarms[ih].remove_dead_peers(self.peer_timeout, now)
+            for pid in dead:
+                self.log('Timed out peer ' + pid)
+            if self.swarms[ih].is_empty():
+                empty.append(ih)
+        for ih in empty:
+            del self.swarms[ih]
 
-    def _http_response(self, status_code, body_dict):
-        """Build a raw HTTP response with JSON body."""
-        status_text = {200: 'OK', 400: 'Bad Request', 404: 'Not Found', 405: 'Method Not Allowed'}
-        body = json.dumps(body_dict).encode('utf-8')
-
-        resp = f"HTTP/1.1 {status_code} {status_text.get(status_code, 'Error')}\r\n"
-        resp += f"Content-Type: application/json\r\n"
-        resp += f"Content-Length: {len(body)}\r\n"
-        resp += f"Connection: close\r\n"
-        resp += f"\r\n"
-
-        return resp.encode('utf-8') + body
+    async def cleanup_loop(self):
+        while True:
+            await asyncio.sleep(self.cleanup_every)
+            self.cleanup_now()
 
 
-async def run_tracker(host='127.0.0.1', port=8000):
-    """Convenience function to run the tracker."""
-    tracker = TrackerServer(host, port)
+# ---------- small helpers for checking params ----------
+
+def check_info_hash(value):
+    # our info_hash is SHA-256 so in hex its 64 characters
+    if value is None or value == '':
+        raise BadRequest(400, 'missing info_hash')
+    if len(value) != 64:
+        raise BadRequest(400, 'info_hash must be 64 hex characters')
+    for ch in value:
+        if ch not in '0123456789abcdefABCDEF':
+            raise BadRequest(400, 'info_hash must be hex')
+    return value.lower()
+
+
+def read_int(params, name, default):
+    # read a number param, it must be a whole number >= 0
+    if name not in params:
+        return default
+    value = params[name]
+    if not value.isdigit():
+        raise BadRequest(400, name + ' must be a non-negative integer')
+    return int(value)
+
+
+async def run_tracker(host='127.0.0.1', port=8000, interval=30, peer_timeout=120):
+    tracker = TrackerServer(host, port, interval=interval, peer_timeout=peer_timeout)
     await tracker.start()
     try:
-        await asyncio.Event().wait()  # run forever
-    except asyncio.CancelledError:
-        pass
+        # just wait forever, Ctrl+C stops it
+        await asyncio.Event().wait()
     finally:
         await tracker.stop()
 
 
+def main():
+    parser = argparse.ArgumentParser(description='BitTorrent-lite tracker')
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--interval', type=int, default=30,
+                        help='seconds between re-announces we ask peers for')
+    parser.add_argument('--timeout', type=int, default=120,
+                        help='drop a peer after this many quiet seconds')
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(run_tracker(args.host, args.port, args.interval, args.timeout))
+    except KeyboardInterrupt:
+        print('[tracker] bye')
+
+
 if __name__ == '__main__':
-    asyncio.run(run_tracker())
+    main()
