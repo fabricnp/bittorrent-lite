@@ -18,12 +18,14 @@ import random
 import hashlib
 import logging
 
-from ..metainfo import metainfo
-from ..metainfo.file_splitter import compute_file_hash
-from ..tracker.tracker import TrackerServer
-from ..peer.client import PeerClient
-from ..strategy.piece_selector import RarestFirst, RandomSelect, SequentialSelect
-from ..strategy.choking import ChokingManager
+# experiments/ is next to src/, not inside it, so import through src.
+# run from the repo root:  python -m experiments.experiment
+from src.metainfo import metainfo
+from src.metainfo.file_splitter import compute_file_hash
+from src.tracker.tracker import TrackerServer
+from src.peer.client import PeerClient
+from src.strategy.piece_selector import RarestFirst, RandomSelect, SequentialSelect
+from src.strategy.choking import ChokingManager
 
 logger = logging.getLogger('experiment')
 
