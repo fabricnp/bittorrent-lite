@@ -381,3 +381,240 @@ def encode_cancel(index: int, piece_count: int = None) -> bytes:
 def decode_cancel(payload: bytes, piece_count: int = None) -> int:
     """Return the cancelled piece index from a CANCEL payload."""
     return _decode_index_payload(payload, "CANCEL", piece_count)
+# ------------------------------------------------------------------
+# Backward-compatible protocol helpers
+# ------------------------------------------------------------------
+
+def build_handshake(info_hash, peer_id):
+    if isinstance(info_hash, str):
+        info_hash = bytes.fromhex(info_hash)
+    if isinstance(peer_id, str):
+        peer_id = peer_id.encode("utf-8")
+
+    peer_id = peer_id[:32].ljust(32, b"\x00")
+
+    if len(info_hash) != 32:
+        raise ValueError("info_hash must be 32 bytes")
+
+    return (
+        bytes([len(PROTOCOL_STRING)])
+        + PROTOCOL_STRING
+        + b"\x00" * 8
+        + info_hash
+        + peer_id
+    )
+
+def build_message(message_id, payload=b""):
+    return struct.pack("!I", 1 + len(payload)) + bytes([message_id]) + payload
+
+
+def build_choke():
+    return build_message(MSG_CHOKE)
+
+
+def build_unchoke():
+    return build_message(MSG_UNCHOKE)
+
+
+def build_interested():
+    return build_message(MSG_INTERESTED)
+
+
+def build_not_interested():
+    return build_message(MSG_NOT_INTERESTED)
+
+
+def build_have(piece_index):
+    return build_message(MSG_HAVE, struct.pack("!I", piece_index))
+
+
+def build_bitfield(bitfield):
+    return build_message(MSG_BITFIELD, bitfield)
+
+
+def build_request(piece_index):
+    return build_message(MSG_REQUEST, struct.pack("!I", piece_index))
+
+
+def build_piece(piece_index, data):
+    return build_message(MSG_PIECE, struct.pack("!I", piece_index) + data)
+
+
+def build_cancel(piece_index):
+    return build_message(MSG_CANCEL, struct.pack("!I", piece_index))
+
+
+def build_keepalive():
+    return struct.pack("!I", 0)
+
+# ------------------------------------------------------------------
+# Legacy compatibility constants
+# ------------------------------------------------------------------
+
+PROTOCOL_STRING = b"BitTorrent-lite"
+HANDSHAKE_LEN = 1 + len(PROTOCOL_STRING) + 8 + 32 + 32
+
+MSG_CHOKE = 0
+MSG_UNCHOKE = 1
+MSG_INTERESTED = 2
+MSG_NOT_INTERESTED = 3
+MSG_HAVE = 4
+MSG_BITFIELD = 5
+MSG_REQUEST = 6
+MSG_PIECE = 7
+MSG_CANCEL = 8
+
+MSG_NAMES = {
+    0: "choke",
+    1: "unchoke",
+    2: "interested",
+    3: "not_interested",
+    4: "have",
+    5: "bitfield",
+    6: "request",
+    7: "piece",
+    8: "cancel",
+}
+
+# ------------------------------------------------------------------
+# Legacy message builders
+# ------------------------------------------------------------------
+
+def build_message(msg_id, payload=b""):
+    payload = bytes(payload)
+    return struct.pack("!I", 1 + len(payload)) + bytes([msg_id]) + payload
+
+
+def build_choke():
+    return build_message(MSG_CHOKE)
+
+
+def build_unchoke():
+    return build_message(MSG_UNCHOKE)
+
+
+def build_interested():
+    return build_message(MSG_INTERESTED)
+
+
+def build_not_interested():
+    return build_message(MSG_NOT_INTERESTED)
+
+
+def build_have(piece_index):
+    return build_message(MSG_HAVE, struct.pack("!I", piece_index))
+
+
+def build_bitfield(bitfield):
+    return build_message(MSG_BITFIELD, bitfield)
+
+
+def build_request(piece_index, begin=0, length=16384):
+    return build_message(
+        MSG_REQUEST,
+        struct.pack("!III", piece_index, begin, length),
+    )
+
+
+def build_piece(piece_index, begin, block):
+    return build_message(
+        MSG_PIECE,
+        struct.pack("!II", piece_index, begin) + bytes(block),
+    )
+
+
+def build_cancel(piece_index, begin=0, length=16384):
+    return build_message(
+        MSG_CANCEL,
+        struct.pack("!III", piece_index, begin, length),
+    )
+
+
+def build_keepalive():
+    return struct.pack("!I", 0)
+
+
+def build_handshake(info_hash, peer_id):
+    if isinstance(info_hash, str):
+        info_hash = bytes.fromhex(info_hash)
+
+    if isinstance(peer_id, str):
+        peer_id = peer_id.encode("utf-8")
+
+    if len(info_hash) != 32:
+        raise ValueError("info_hash must be 32 bytes")
+
+    peer_id = peer_id[:32].ljust(32, b"\x00")
+
+    return (
+        bytes([len(PROTOCOL_STRING)])
+        + PROTOCOL_STRING
+        + b"\x00" * 8
+        + info_hash
+        + peer_id
+    )
+
+def parse_request(payload):
+    if len(payload) != 12:
+        raise ValueError("Invalid request payload")
+
+    return struct.unpack("!III", payload)
+
+
+def parse_piece(payload):
+    if len(payload) < 8:
+        raise ValueError("Invalid piece payload")
+
+    piece_index, begin = struct.unpack("!II", payload[:8])
+    return piece_index, begin, payload[8:]
+
+
+def parse_cancel(payload):
+    if len(payload) != 12:
+        raise ValueError("Invalid cancel payload")
+
+    return struct.unpack("!III", payload)
+
+
+def parse_handshake(data):
+    if len(data) < HANDSHAKE_LEN:
+        raise ValueError("Handshake too short")
+
+    pstrlen = data[0]
+
+    if pstrlen != len(PROTOCOL_STRING):
+        raise ValueError("Invalid protocol string length")
+
+    protocol = data[1:1 + pstrlen]
+
+    if protocol != PROTOCOL_STRING:
+        raise ValueError("Invalid protocol string")
+
+    offset = 1 + pstrlen + 8
+
+    info_hash = data[offset:offset + 32]
+    peer_id = data[offset + 32:offset + 64].rstrip(b"\x00")
+
+    return info_hash, peer_id
+
+
+def parse_request(payload):
+    if len(payload) != 12:
+        raise ValueError("Invalid request payload")
+
+    return struct.unpack("!III", payload)
+
+
+def parse_piece(payload):
+    if len(payload) < 8:
+        raise ValueError("Invalid piece payload")
+
+    piece_index, begin = struct.unpack("!II", payload[:8])
+    return piece_index, begin, payload[8:]
+
+
+def parse_cancel(payload):
+    if len(payload) != 12:
+        raise ValueError("Invalid cancel payload")
+
+    return struct.unpack("!III", payload)
