@@ -2,38 +2,23 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
 
-# Virtual environments
-venv/
+# Virtual environment
 .venv/
+venv/
 env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
 
 # OS
 .DS_Store
-Thumbs.db
 
-# Experiment data (large files)
-experiments/results/
-experiments/data/*.bin
-
-# Test artifacts
-tests/tmp/
-
-# partial downloads from the assembler + peer download dirs
-*.part
-downloads/
-
-# local helper scripts
-push_now.bat
+# Logs
+*.log
