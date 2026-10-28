@@ -187,14 +187,36 @@ def generate(file_path, tracker_url=None, piece_length=None, output_path=None, *
     meta = create_metainfo(file_path, piece_size=piece_size)
 
     if output_path is not None:
-        save_metainfo(meta, output_path)
+        # Save with tracker URL in the metadata
+        data = meta.to_dict()
+        if tracker_url:
+            data['announce'] = tracker_url
+        
+        import json
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
 
     return meta
 
 
 def parse(path):
     """Compatibility wrapper for loading metainfo from a file."""
-    return load_metainfo(path)
+    meta = load_metainfo(path)
+    # Return dict format expected by client code
+    import hashlib
+    info_dict = meta.to_dict()
+    info_hash = hashlib.sha256(str(info_dict).encode()).digest()
+    
+    return {
+        'file_name': meta.file_name,
+        'file_length': meta.file_size,
+        'piece_length': meta.piece_size,
+        'piece_hashes': [bytes.fromhex(h) for h in meta.piece_hashes],
+        'info_hash': info_hash,
+        'info_hash_hex': info_hash.hex(),
+        'tracker_url': 'http://127.0.0.1:8000',  # default, can be overridden
+    }
 
 
 def parse_bytes(data):

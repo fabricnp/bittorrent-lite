@@ -122,7 +122,7 @@ python -m src.tracker --host 127.0.0.1 --port 8000 --interval 30 --timeout 120
 
 ---
 
-## 2. Peer wire protocol
+## 2. Peer wire protocol (Member C)
 
 Code: `src/peer/protocol.py`. All integers are big-endian.
 
@@ -160,6 +160,299 @@ request (up to 5 outstanding) -> piece -> verify SHA-256 -> have to everyone.
 
 ---
 
-## 3. Piece selection and choking (Member D)
+## 3. Piece Selection and Choking (Member D)
 
-*To be written by Member D* (`src/strategy/piece_selector.py`, `src/strategy/choking.py`).
+### 3.1 Piece Selection Strategies
+
+Code: `src/strategy/piece_selector.py`
+
+Three strategies are implemented to control which piece a peer requests next when downloading from another peer:
+
+#### 3.1.1 Rarest-First Selection
+
+**Algorithm**: Among all pieces that:
+- The peer we're connected to has
+- We don't have yet
+- Are not already requested (pending)
+
+Pick the one that the fewest connected peers have (lowest availability count).
+
+**Purpose**: Distributes rare pieces quickly across the swarm. This improves overall swarm health because:
+1. Rare pieces become more common faster
+2. Peers become useful uploaders sooner (they have something others want)
+3. The swarm is more resilient to peer departures
+
+**Tie-breaking**: When multiple pieces have the same availability, pick randomly to avoid all peers requesting the same piece simultaneously.
+
+**Implementation**:
+```
+Class: RarestFirst
+- update_availability(bitfield) - track piece counts when peer connects
+- remove_peer_availability(bitfield) - update counts when peer disconnects
+- select(missing, peer_bitfield, pending) - returns piece index or None
+```
+
+**Example**: If pieces 0,1,2 are available from 5,3,3 peers respectively and we need all three, request piece 1 first.
+
+#### 3.1.2 Random Selection
+
+**Algorithm**: Pick a random piece from the set of pieces that satisfy:
+- The peer has it
+- We don't have it yet
+- Not already pending
+
+**Purpose**: Baseline comparison strategy. Requires no availability tracking, no coordination. Useful for:
+- Validating that rarest-first actually helps
+- Low-overhead operation when piece availability doesn't matter
+
+**Implementation**:
+```
+Class: RandomSelect
+- select(missing, peer_bitfield, pending) - returns random choice or None
+- update_availability/remove_peer_availability - no-ops
+```
+
+#### 3.1.3 Sequential Selection
+
+**Algorithm**: Among available pieces, always pick the lowest index first (0, then 1, then 2...).
+
+**Purpose**: Baseline comparison. Represents naive download order. Expected to perform worst because:
+- All peers want the same pieces at the same time
+- High contention on early pieces
+- Late pieces remain rare for longest
+
+**Implementation**:
+```
+Class: SequentialSelect
+- select(missing, peer_bitfield, pending) - returns min(candidates) or None
+- update_availability/remove_peer_availability - no-ops
+```
+
+### 3.2 Integration with Peer Connections
+
+Each `PeerConnection` has a reference to a `piece_selector` instance. When the connection is:
+- Not choked by the remote peer (`peer_choking == False`)
+- Interested in the remote peer (`am_interested == True`)
+- Has fewer than `max_pending` (default 5) outstanding requests
+
+The connection calls:
+```python
+piece_idx = self.piece_selector.select(
+    missing=self.assembler.missing_pieces(),
+    peer_bitfield=self.peer_bitfield,
+    pending_requests=self.pending_requests
+)
+```
+
+If a piece is selected, a REQUEST message is sent and the index is added to `pending_requests`.
+
+### 3.3 Choking Algorithm
+
+Code: `src/strategy/choking.py`
+
+**Purpose**: Limit upload bandwidth to peers who reciprocate (upload to us). Discourages free-riding and rewards peers who contribute.
+
+#### 3.3.1 Algorithm Parameters
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `max_unchoked` | 4 | Max number of regular unchoked peers |
+| `eval_interval` | 10s | How often to re-evaluate who to unchoke |
+| `optimistic_interval` | 30s | How often to unchoke a random choked peer |
+
+#### 3.3.2 Regular Unchoking
+
+Every `eval_interval` seconds:
+
+1. **Collect interested peers**: Only peers with `peer_interested == True` are candidates
+2. **Sort by contribution**: Rank by how many bytes they uploaded to us in the last interval
+3. **Unchoke top N**: The `max_unchoked` most generous peers are unchoked
+4. **Choke the rest**: Previously unchoked peers not in top N are choked
+5. **Reset counters**: Upload byte counts are zeroed for the next interval
+
+**Free-rider detection**: Peers with zero upload in the interval are logged as potential free-riders.
+
+#### 3.3.3 Optimistic Unchoking
+
+Every `optimistic_interval` seconds (separate from regular evaluation):
+
+1. **Pick a random choked peer** who is interested in us
+2. **Unchoke them** even though they haven't uploaded recently
+3. **Choke the previous optimistic peer** (if they're not in the regular unchoked set)
+
+**Purpose**: 
+- Give new peers a chance to prove themselves
+- Discover peers with better connections than current unchoked set
+- Prevent starvation of unlucky peers
+
+#### 3.3.4 Integration
+
+The `ChokingManager` is queried by each peer connection:
+
+```python
+to_unchoke, to_choke = choking_manager.evaluate(connected_peers)
+
+for peer_id in to_unchoke:
+    connection.send_unchoke()
+
+for peer_id in to_choke:
+    connection.send_choke()
+```
+
+When a peer uploads data to us:
+```python
+choking_manager.record_upload(peer_id, num_bytes)
+```
+
+#### 3.3.5 Seeder Behavior
+
+Seeders (peers with all pieces) unchoke all interested peers immediately since they have no download incentive - they're purely altruistic.
+
+### 3.4 Interaction Between Selection and Choking
+
+1. **Choking affects download**: If we are choked by a peer, we cannot request pieces from them
+2. **Selection affects upload**: Which pieces we have determines if other peers are interested in us
+3. **Rarest-first helps choking**: By acquiring rare pieces quickly, we become valuable to more peers, which increases our upload opportunities
+
+### 3.5 Request Pipeline
+
+To maintain efficiency despite network round-trip time, up to **5 requests** per peer can be outstanding simultaneously (pipelined). When a PIECE arrives:
+- Remove that index from `pending_requests`
+- Immediately request another piece if available
+
+Without pipelining, each piece would suffer a full RTT of idle time.
+
+### 3.6 Piece Verification
+
+Every received piece is SHA-256 verified before:
+- Accepting it into `have` bitfield
+- Broadcasting HAVE messages to other peers
+- Allowing the assembler to write it to disk
+
+Bad pieces are silently dropped and not counted against the sender's upload stats.
+
+### 3.7 Endgame Mode
+
+Not implemented. In a production system, when only a few pieces remain, all peers would request those pieces from multiple sources and cancel duplicates when the first arrives.
+
+---
+
+## 4. Experimental Validation (Member D)
+
+### 4.1 Hypothesis
+
+Rarest-first piece selection reduces total swarm distribution time compared with random and sequential selection, particularly as swarm size increases.
+
+### 4.2 Experiment Design
+
+**Fixed Parameters**:
+- File size: 100 MB
+- Piece size: 256 KB
+- Rate limit: 5 MB/s per peer (token bucket)
+
+**Independent Variables**:
+- Piece selection strategy: rarest-first, random, sequential
+- Swarm size: 6 and 8 peers
+- Seeder count: 1 and 2
+
+**Dependent Variables**:
+- Total distribution time (max completion time across all leechers)
+- Per-peer completion time
+- Piece availability variance over time
+
+**Repetitions**: 5 runs per configuration for statistical significance
+
+**Free-Rider Experiment**: Separate runs with 2 non-uploading peers to validate choking effectiveness.
+
+### 4.3 Implementation
+
+Code: `experiments/experiment.py`, `experiments/plot_results.py`
+
+The experiment harness:
+1. Creates a test file with reproducible random data
+2. Generates the metainfo file
+3. Starts the tracker
+4. Launches N seeders and M leechers with the specified strategy
+5. Records completion times and transfer statistics
+6. Saves results as JSON
+
+Results are analyzed and plotted as:
+- Box plots of distribution time per strategy
+- Per-peer completion time comparison
+- Free-rider impact visualization
+
+### 4.4 Running Experiments
+
+```bash
+# Run full experiment suite
+python -m experiments.experiment
+
+# Generate plots from results
+python -m experiments.plot_results
+```
+
+Results are saved to `experiments/results/`:
+- `results.json` - raw data
+- `distribution_time.png` - main hypothesis test
+- `per_peer_completion.png` - individual peer performance
+- `free_rider_impact.png` - choking effectiveness
+- `summary.csv` - statistical summary
+
+---
+
+## 5. System Architecture
+
+```
+┌─────────────┐
+│   Tracker   │  HTTP/TCP server, manages swarm membership
+└──────┬──────┘
+       │ announce/peer-list
+       │
+   ┌───┴────────────────┐
+   │                    │
+┌──▼───┐            ┌───▼──┐
+│Peer A│◄──TCP─────►│Peer B│  Wire protocol: handshake, bitfield,
+└──┬───┘            └───┬──┘  request, piece, choke, unchoke
+   │                    │
+   │  ┌──────────────┐  │
+   └─►│ Piece Store  │◄─┘     FileAssembler: verify & write pieces
+      └──────────────┘
+```
+
+Each peer has:
+- **PeerClient**: orchestrates tracker communication and peer connections
+- **PeerConnection**: manages one TCP connection to another peer
+- **FileAssembler**: validates and stores received pieces
+- **PieceSelector**: chooses which piece to request next
+- **ChokingManager**: decides which peers to unchoke
+
+---
+
+## 6. Testing
+
+Unit tests: `tests/test_*.py`
+
+Key test coverage:
+- Protocol message encoding/decoding
+- Piece selection algorithm behavior
+- Choking manager state transitions
+- Tracker announce/scrape
+- Multi-peer transfer scenarios
+
+Run tests:
+```bash
+pytest tests/ -v
+```
+
+---
+
+## 7. Future Work
+
+Not implemented (outside project scope):
+- Endgame mode (parallel requests for final pieces)
+- NAT traversal / DHT
+- Encryption
+- Super-seeding mode
+- Piece reordering for streaming
+- UDP tracker protocol
+- Magnet links
