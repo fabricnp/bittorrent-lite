@@ -5,7 +5,10 @@ from .metainfo import (
     hash_piece,
     load_metainfo,
     save_metainfo,
+    generate,
+    parse,
 )
+from .assembler import FileAssembler
 
 __all__ = [
     "Metainfo",
@@ -14,4 +17,7 @@ __all__ = [
     "hash_piece",
     "load_metainfo",
     "save_metainfo",
+    "generate",
+    "parse",
+    "FileAssembler",
 ]

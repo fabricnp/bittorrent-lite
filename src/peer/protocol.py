@@ -598,6 +598,12 @@ def parse_handshake(data):
     return info_hash, peer_id
 
 
+def parse_have(payload):
+    if len(payload) != 4:
+        raise ValueError("Invalid have payload")
+    return struct.unpack("!I", payload)[0]
+
+
 def parse_request(payload):
     if len(payload) != 12:
         raise ValueError("Invalid request payload")
@@ -618,3 +624,43 @@ def parse_cancel(payload):
         raise ValueError("Invalid cancel payload")
 
     return struct.unpack("!III", payload)
+
+
+# ------------------------------------------------------------------
+# Async protocol helpers for reading from asyncio streams
+# ------------------------------------------------------------------
+
+async def read_handshake(reader):
+    """
+    Read a handshake from an asyncio reader.
+    Returns (info_hash, peer_id) as bytes.
+    """
+    data = await reader.readexactly(HANDSHAKE_LEN)
+    return parse_handshake(data)
+
+
+async def read_message(reader):
+    """
+    Read one message from an asyncio reader.
+    Returns (message_id, payload) or (None, b'') for keepalive.
+    """
+    # Read length prefix
+    length_bytes = await reader.readexactly(4)
+    length = struct.unpack("!I", length_bytes)[0]
+    
+    if length == 0:
+        # Keepalive
+        return None, b''
+    
+    # Read message type
+    msg_type_bytes = await reader.readexactly(1)
+    msg_type = msg_type_bytes[0]
+    
+    # Read payload
+    payload_len = length - 1
+    if payload_len > 0:
+        payload = await reader.readexactly(payload_len)
+    else:
+        payload = b''
+    
+    return msg_type, payload
