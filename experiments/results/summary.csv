@@ -1,0 +1,13 @@
+strategy,swarm_size,seeders,avg_distribution_time,std_distribution_time,avg_peer_time,avg_availability_variance
+random,6,1,99.328,0.419,85.546,0.718
+random,6,2,41.633,0.324,39.171,0.665
+random,8,1,75.21,18.664,61.889,1.449
+random,8,2,55.587,4.286,46.244,1.038
+rarest_first,6,1,99.389,0.331,85.991,0.928
+rarest_first,6,2,43.476,0.641,41.101,0.484
+rarest_first,8,1,85.694,21.469,68.286,0.914
+rarest_first,8,2,53.762,2.212,46.191,0.958
+sequential,6,1,69.763,1.042,69.752,4.035
+sequential,6,2,59.232,1.855,59.223,2.606
+sequential,8,1,76.561,2.484,75.837,6.653
+sequential,8,2,64.082,1.424,64.057,5.696
