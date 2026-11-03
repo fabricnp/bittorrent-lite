@@ -179,49 +179,49 @@ def load_metainfo(path: str) -> Metainfo:
 # ------------------------------------------------------------------
 
 def generate(file_path, tracker_url=None, piece_length=None, output_path=None, **kwargs):
-    """Compatibility wrapper around create_metainfo/save_metainfo."""
+    """Create JSON metainfo and return its path and swarm hash."""
     piece_size = piece_length if piece_length is not None else kwargs.get(
         "piece_size", 256 * 1024
     )
-
     meta = create_metainfo(file_path, piece_size=piece_size)
+    if output_path is None:
+        output_path = os.path.splitext(file_path)[0] + ".torrent"
 
-    if output_path is not None:
-        # Save with tracker URL in the metadata
-        data = meta.to_dict()
-        if tracker_url:
-            data['announce'] = tracker_url
-        
-        import json
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-            f.write("\n")
+    data = meta.to_dict()
+    if tracker_url:
+        data["announce"] = tracker_url
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4)
+        file.write("\n")
 
-    return meta
+    info_hash = _json_info_hash(meta)
+    return output_path, info_hash.hex()
 
 
 def parse(path):
-    """Compatibility wrapper for loading metainfo from a file."""
-    meta = load_metainfo(path)
-    # Return dict format expected by client code
-    import hashlib
-    info_dict = meta.to_dict()
-    info_hash = hashlib.sha256(str(info_dict).encode()).digest()
-    
+    """Load JSON metainfo and return the fields used by PeerClient."""
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise MetainfoError(f"invalid JSON in {path}: {exc}") from exc
+    meta = validate_metainfo(data)
+    info_hash = _json_info_hash(meta)
     return {
-        'file_name': meta.file_name,
-        'file_length': meta.file_size,
-        'piece_length': meta.piece_size,
-        'piece_hashes': [bytes.fromhex(h) for h in meta.piece_hashes],
-        'info_hash': info_hash,
-        'info_hash_hex': info_hash.hex(),
-        'tracker_url': 'http://127.0.0.1:8000',  # default, can be overridden
+        "file_name": meta.file_name,
+        "file_length": meta.file_size,
+        "piece_length": meta.piece_size,
+        "num_pieces": meta.piece_count,
+        "piece_hashes": [bytes.fromhex(digest) for digest in meta.piece_hashes],
+        "file_hash": None,
+        "info_hash": info_hash,
+        "info_hash_hex": info_hash.hex(),
+        "tracker_url": data.get("announce", "http://127.0.0.1:8000"),
     }
 
 
-def parse_bytes(data):
-    """Compatibility parser for bencoded metainfo bytes."""
-    from . import bencode
-
-    decoded = bencode.decode(data)
-    return validate_metainfo(decoded)
+def _json_info_hash(meta):
+    canonical = json.dumps(
+        meta.to_dict(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).digest()

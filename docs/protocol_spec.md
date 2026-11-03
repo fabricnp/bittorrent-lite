@@ -39,7 +39,7 @@ Connection: close\r\n
 
 | param        | required | meaning |
 |--------------|----------|---------|
-| `info_hash`  | yes | SHA-256 of the bencoded info dict, as 64 hex chars (case does not matter) |
+| `info_hash`  | yes | A 64-character hexadecimal swarm identifier supplied by the peer; the tracker uses it as a key and does not calculate it |
 | `peer_id`    | yes | peer's id, 1-64 chars |
 | `port`       | yes | port the peer listens on for other peers, 1-65535 |
 | `event`      | no  | `started`, `completed`, `stopped` or empty (regular re-announce) |

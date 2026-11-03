@@ -86,7 +86,7 @@ def cmd_verify(args):
         print("FAIL: all pieces ok but whole file hash differs")
         return 1
 
-    print(f"OK: {t['num_pieces']} pieces verified, file sha256 matches")
+    print(f"OK: all {t['num_pieces']} piece hashes match")
     return 0
 
 
