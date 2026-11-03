@@ -16,7 +16,7 @@ import urllib.parse
 
 from ..metainfo import metainfo, FileAssembler
 from ..metainfo.file_splitter import get_piece_data, compute_file_hash
-from .peer_connection import PeerConnection
+from .peer_connection import PeerConnection, UploadRateLimiter
 from . import protocol
 
 logger = logging.getLogger('client')
@@ -29,7 +29,8 @@ class PeerClient:
 
     def __init__(self, torrent_path, download_dir='.', listen_port=6881,
                  peer_id=None, piece_selector=None, choking_manager=None,
-                 is_seeder=False, source_file=None, rate_limit=0):
+                 is_seeder=False, source_file=None, rate_limit=0,
+                 upload_enabled=True):
         # is_seeder + source_file means we already have the whole file and
         # just load it straight in below instead of downloading anything
         # parse the torrent file
@@ -46,6 +47,8 @@ class PeerClient:
         self.is_seeder = is_seeder
         self.source_file = source_file
         self.rate_limit = rate_limit
+        self.upload_enabled = upload_enabled
+        self.upload_limiter = UploadRateLimiter(rate_limit)
 
         # set up assembler
         self.assembler = FileAssembler(
@@ -67,6 +70,9 @@ class PeerClient:
         # stats
         self.start_time = None
         self.end_time = None
+        self._closed_bytes_uploaded = 0
+        self._closed_bytes_downloaded = 0
+        self._accounted_connections = set()
 
     def _load_as_seeder(self):
         """Load all pieces from the source file (for seeders)."""
@@ -92,7 +98,7 @@ class PeerClient:
         # broadcast to all connected peers
         for conn in self.connections.values():
             if conn.connected:
-                asyncio.create_task(conn.send_have(piece_index))
+                asyncio.create_task(self._send_have(conn, piece_index))
 
         progress = self.assembler.progress * 100
         logger.info(f"Progress: {progress:.1f}%")
@@ -102,6 +108,12 @@ class PeerClient:
             self.end_time = time.time()
             elapsed = self.end_time - self.start_time
             logger.info(f"Download complete in {elapsed:.2f}s!")
+
+    async def _send_have(self, conn, piece_index):
+        try:
+            await conn.send_have(piece_index)
+        except (OSError, ConnectionError):
+            logger.debug("Peer %s disconnected before HAVE was sent", conn.remote_peer_id)
 
     async def start(self):
         """Start the peer client."""
@@ -145,6 +157,9 @@ class PeerClient:
                 logger.warning(f"Timeout after {timeout}s")
                 break
 
+            if self.choking_manager:
+                await self._update_choking()
+
             # periodically re-announce to tracker
             if int(elapsed) % 30 == 0 and int(elapsed) > 0:
                 try:
@@ -169,6 +184,41 @@ class PeerClient:
 
         return self.get_stats()
 
+    async def _update_choking(self):
+        to_unchoke, to_choke = self.choking_manager.evaluate(self.connections)
+        actions = [
+            self.connections[peer_id].send_unchoke()
+            for peer_id in to_unchoke
+            if peer_id in self.connections
+        ] + [
+            self.connections[peer_id].send_choke()
+            for peer_id in to_choke
+            if peer_id in self.connections
+        ]
+        if actions:
+            await asyncio.gather(*actions, return_exceptions=True)
+
+    def _piece_provider(self):
+        return self._provide_piece if self.upload_enabled else None
+
+    def _register_choking_peer(self, conn):
+        if self.choking_manager:
+            self.choking_manager.register_peer(conn.remote_peer_id)
+
+    def _unregister_choking_peer(self, conn):
+        if self.choking_manager and conn.remote_peer_id:
+            self.choking_manager.unregister_peer(conn.remote_peer_id)
+
+    def _finish_connection(self, conn):
+        connection_id = id(conn)
+        if connection_id not in self._accounted_connections:
+            self._closed_bytes_uploaded += conn.bytes_uploaded
+            self._closed_bytes_downloaded += conn.bytes_downloaded
+            self._accounted_connections.add(connection_id)
+        if self.connections.get(conn.remote_peer_id) is conn:
+            del self.connections[conn.remote_peer_id]
+        self._unregister_choking_peer(conn)
+
     async def stop(self):
         """Clean shutdown."""
         # tell tracker we're leaving
@@ -178,13 +228,25 @@ class PeerClient:
             pass
 
         # close all peer connections
-        for conn in list(self.connections.values()):
-            await conn.disconnect()
+        connections = list(self.connections.values())
+        results = await asyncio.gather(
+            *(asyncio.wait_for(conn.disconnect(), timeout=2) for conn in connections),
+            return_exceptions=True,
+        )
+        for conn, result in zip(connections, results):
+            if isinstance(result, asyncio.TimeoutError):
+                if conn.writer and conn.writer.transport:
+                    conn.writer.transport.abort()
 
         # stop server
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
+            try:
+                await asyncio.wait_for(self.server.wait_closed(), timeout=2)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for peer server to close")
+
+        self.assembler.close()
 
     async def _handle_incoming(self, reader, writer):
         """Handle an incoming peer connection."""
@@ -195,11 +257,12 @@ class PeerClient:
             peer_id=self.peer_id,
             info_hash=self.info_hash,
             assembler=self.assembler,
-            piece_provider=self._provide_piece,
+            piece_provider=self._piece_provider(),
             on_piece_complete=self._on_piece_complete,
             piece_selector=self.piece_selector,
             choking_manager=self.choking_manager,
             rate_limit=self.rate_limit,
+            upload_limiter=self.upload_limiter,
         )
         await conn.accept(reader, writer)
 
@@ -216,6 +279,7 @@ class PeerClient:
                 return
 
             conn.remote_peer_id = remote_id.decode('utf-8', errors='replace').strip('\x00')
+            self._register_choking_peer(conn)
 
             # send our handshake back
             hs = protocol.build_handshake(self.info_hash, self.peer_id)
@@ -226,7 +290,7 @@ class PeerClient:
             await conn.send_bitfield()
 
             # unchoke them if we're a seeder (seeders are generous)
-            if self.is_seeder:
+            if self.is_seeder and not self.choking_manager:
                 await conn.send_unchoke()
 
             self.connections[conn.remote_peer_id] = conn
@@ -235,8 +299,7 @@ class PeerClient:
         except Exception as e:
             logger.error(f"Incoming connection error: {e}")
         finally:
-            if conn.remote_peer_id and conn.remote_peer_id in self.connections:
-                del self.connections[conn.remote_peer_id]
+            self._finish_connection(conn)
 
     async def _connect_to_peer(self, ip, port):
         """Establish outgoing connection to a peer."""
@@ -244,11 +307,12 @@ class PeerClient:
             peer_id=self.peer_id,
             info_hash=self.info_hash,
             assembler=self.assembler,
-            piece_provider=self._provide_piece,
+            piece_provider=self._piece_provider(),
             on_piece_complete=self._on_piece_complete,
             piece_selector=self.piece_selector,
             choking_manager=self.choking_manager,
             rate_limit=self.rate_limit,
+            upload_limiter=self.upload_limiter,
         )
 
         if not await conn.connect(ip, port):
@@ -257,11 +321,13 @@ class PeerClient:
         if not await conn.do_handshake():
             return
 
+        self._register_choking_peer(conn)
+
         # exchange bitfields
         await conn.send_bitfield()
 
         # unchoke if seeder
-        if self.is_seeder:
+        if self.is_seeder and not self.choking_manager:
             await conn.send_unchoke()
 
         self.connections[conn.remote_peer_id] = conn
@@ -275,8 +341,7 @@ class PeerClient:
         try:
             await conn.run()
         finally:
-            if conn.remote_peer_id in self.connections:
-                del self.connections[conn.remote_peer_id]
+            self._finish_connection(conn)
 
     async def _tracker_announce(self, event=''):
         """Send announce request to tracker and get peer list."""
@@ -348,8 +413,12 @@ class PeerClient:
             end = self.end_time or time.time()
             elapsed = end - self.start_time
 
-        total_down = sum(c.bytes_downloaded for c in self.connections.values())
-        total_up = sum(c.bytes_uploaded for c in self.connections.values())
+        total_down = self._closed_bytes_downloaded + sum(
+            c.bytes_downloaded for c in self.connections.values()
+        )
+        total_up = self._closed_bytes_uploaded + sum(
+            c.bytes_uploaded for c in self.connections.values()
+        )
 
         return {
             'peer_id': self.peer_id,

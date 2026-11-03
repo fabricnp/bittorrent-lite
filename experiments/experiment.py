@@ -17,6 +17,7 @@ import time
 import random
 import hashlib
 import logging
+import statistics
 
 # experiments/ is next to src/, not inside it, so import through src.
 # run from the repo root:  python -m experiments.experiment
@@ -128,6 +129,7 @@ async def run_single_experiment(config):
                 choking_manager=choker,
                 is_seeder=False,
                 rate_limit=rate_limit,
+                upload_enabled=not is_free_rider,
             )
             clients.append(('leecher', client))
 
@@ -135,17 +137,75 @@ async def run_single_experiment(config):
         for role, client in clients:
             await client.start()
 
-        # run all clients concurrently
+        # Sample how evenly pieces are spread while peers download.
+        availability_samples = []
+        sample_start = time.monotonic()
+
+        async def sample_availability():
+            while True:
+                counts = [
+                    sum(bool(client.assembler.have[index]) for _, client in clients)
+                    for index in range(clients[0][1].assembler.num_pieces)
+                ]
+                availability_samples.append({
+                    'elapsed_seconds': round(time.monotonic() - sample_start, 2),
+                    'variance': statistics.pvariance(counts) if counts else 0.0,
+                })
+                await asyncio.sleep(1)
+
+        sampler_task = asyncio.create_task(sample_availability())
+
+        # Run all peers together. Stop seeders once the leechers finish instead
+        # of making every configuration wait for the full timeout.
         async def run_client(role, client):
             stats = await client.run_until_complete(timeout=timeout)
             return role, stats
 
         tasks = [
-            asyncio.create_task(run_client(role, client))
+            (role, client, asyncio.create_task(run_client(role, client)))
             for role, client in clients
         ]
+        leecher_tasks = [task for role, _, task in tasks if role == 'leecher']
+        seeder_tasks = [task for role, _, task in tasks if role == 'seeder']
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        leechers = [client for role, client in clients if role == 'leecher']
+        finish_deadline = time.monotonic() + timeout + 5
+        while (
+            not all(client.assembler.complete for client in leechers)
+            and time.monotonic() < finish_deadline
+        ):
+            await asyncio.sleep(0.1)
+
+        for client in leechers:
+            if not client.assembler.complete:
+                logger.warning("Peer %s did not finish before the experiment timeout", client.peer_id)
+
+        # A completed peer can still be inside a choking or socket-write wait.
+        # Stop those loops based on the piece state we sampled above.
+        for task in leecher_tasks:
+            if not task.done():
+                task.cancel()
+        leecher_results = await asyncio.gather(*leecher_tasks, return_exceptions=True)
+
+        for role, client in clients:
+            if role == 'leecher' and client.assembler.complete and not client.assembler.assembled:
+                try:
+                    client.assembler.assemble()
+                except OSError as exc:
+                    logger.error("Could not assemble %s: %s", client.peer_id, exc)
+
+        for task in seeder_tasks:
+            task.cancel()
+        await asyncio.gather(*seeder_tasks, return_exceptions=True)
+        sampler_task.cancel()
+        try:
+            await sampler_task
+        except asyncio.CancelledError:
+            pass
+
+        for task, result in zip(leecher_tasks, leecher_results):
+            if isinstance(result, Exception):
+                logger.error("Leecher task failed: %s", result)
 
         # collect stats
         experiment_result = {
@@ -157,13 +217,11 @@ async def run_single_experiment(config):
                 'rate_limit': rate_limit,
             },
             'peers': [],
+            'availability_variance': availability_samples,
         }
 
-        for item in results:
-            if isinstance(item, Exception):
-                logger.error(f"Client error: {item}")
-                continue
-            role, stats = item
+        for role, client, task in tasks:
+            stats = client.get_stats()
             stats['role'] = role
             experiment_result['peers'].append(stats)
 
@@ -171,12 +229,20 @@ async def run_single_experiment(config):
 
     finally:
         # cleanup
-        for _, client in clients:
-            try:
-                await client.stop()
-            except Exception:
-                pass
-        await tracker.stop()
+        results = await asyncio.gather(
+            *(
+                asyncio.wait_for(client.stop(), timeout=10)
+                for _, client in clients
+            ),
+            return_exceptions=True,
+        )
+        for (_, client), result in zip(clients, results):
+            if isinstance(result, Exception):
+                logger.warning("Could not stop peer %s cleanly: %s", client.peer_id, result)
+        try:
+            await asyncio.wait_for(tracker.stop(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out stopping experiment tracker")
 
 
 async def run_full_experiment(output_dir='experiments/results'):

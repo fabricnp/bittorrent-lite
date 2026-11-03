@@ -10,6 +10,8 @@ I used ChatGPT during development of the codebase to review implementation, find
 
 During the demo, the tracker stopped listing a seeder after its announce expired, and Ctrl+C did not stop the seeder process in Windows. ChatGPT helped me trace both problems. I updated the seeder to refresh its tracker entry every 30 seconds and identify itself as a seeder, then changed its shutdown wait so Windows can handle Ctrl+C. I confirmed the shutdown behavior manually and ran the full test suite; all 277 tests passed.
 
+While preparing the piece-selection experiment, ChatGPT helped me compare the harness with the experiment plan and find gaps: it did not record piece availability variance, free-rider peers could still upload, and rarest-first was not getting updated piece counts. I changed the harness and peer code to collect variance samples, disable uploads for free riders, update availability as peers exchange bitfields and pieces, and apply each peer's upload limit across its connections. I also fixed experiment cleanup so completed runs stop their peer tasks and sockets. I used the project tests and a small transfer run to check these changes; the full experiment matrix is still running, so I have not drawn conclusions from its results yet.
+
 ## Reference material
 
 These sources were checked during AI-assisted review of the metainfo and hashing implementation. The BitTorrent specification describes the standard protocol; this class project is simplified and uses SHA-256 for piece hashes.

@@ -139,6 +139,43 @@ def plot_per_peer_completion(results, output_dir='experiments/results'):
     print("Saved per_peer_completion.png")
 
 
+def plot_piece_availability_variance(results, output_dir='experiments/results'):
+    """Compare each run's average variance in piece availability."""
+    main_results = [r for r in results if r.get('experiment_type') != 'free_rider']
+    data = []
+    labels = []
+
+    for strategy in ['rarest_first', 'random', 'sequential']:
+        run_means = []
+        for result in main_results:
+            if result['config']['strategy'] != strategy:
+                continue
+            samples = result.get('availability_variance', [])
+            values = [sample['variance'] for sample in samples]
+            if values:
+                run_means.append(float(np.mean(values)))
+        if run_means:
+            data.append(run_means)
+            labels.append(strategy.replace('_', '\n'))
+
+    if not data:
+        print("No piece availability samples to plot")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    for patch, color in zip(bp['boxes'], ['#4CAF50', '#2196F3', '#FF9800']):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax.set_ylabel('Mean piece availability variance per run')
+    ax.set_title('Piece Availability Variance by Strategy')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'availability_variance.png'), dpi=150)
+    plt.close()
+    print("Saved availability_variance.png")
+
+
 def plot_free_rider_results(results, output_dir='experiments/results'):
     """
     Compare completion times of free-riders vs normal peers.
@@ -199,6 +236,10 @@ def generate_summary_table(results, output_dir='experiments/results'):
         leecher_times = [p['elapsed_seconds'] for p in r['peers']
                         if p['role'] == 'leecher' and p['complete']]
         if leecher_times:
+            variance_values = [
+                sample['variance']
+                for sample in r.get('availability_variance', [])
+            ]
             rows.append({
                 'strategy': cfg['strategy'],
                 'swarm_size': total_peers,
@@ -207,6 +248,9 @@ def generate_summary_table(results, output_dir='experiments/results'):
                 'max_time': max(leecher_times),
                 'mean_time': np.mean(leecher_times),
                 'std_time': np.std(leecher_times),
+                'mean_availability_variance': (
+                    np.mean(variance_values) if variance_values else np.nan
+                ),
             })
 
     df = pd.DataFrame(rows)
@@ -217,6 +261,7 @@ def generate_summary_table(results, output_dir='experiments/results'):
         avg_distribution_time=('max_time', 'mean'),
         std_distribution_time=('max_time', 'std'),
         avg_peer_time=('mean_time', 'mean'),
+        avg_availability_variance=('mean_availability_variance', 'mean'),
     ).round(3).reset_index()
 
     csv_path = os.path.join(output_dir, 'summary.csv')
@@ -238,6 +283,7 @@ def main():
 
     plot_distribution_time(results, output_dir)
     plot_per_peer_completion(results, output_dir)
+    plot_piece_availability_variance(results, output_dir)
     plot_free_rider_results(results, output_dir)
     generate_summary_table(results, output_dir)
 

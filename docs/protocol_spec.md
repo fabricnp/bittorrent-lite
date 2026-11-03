@@ -379,6 +379,7 @@ The experiment harness:
 Results are analyzed and plotted as:
 - Box plots of distribution time per strategy
 - Per-peer completion time comparison
+- Piece-availability variance over time and by strategy
 - Free-rider impact visualization
 
 ### 4.4 Running Experiments
@@ -395,6 +396,7 @@ Results are saved to `experiments/results/`:
 - `results.json` - raw data
 - `distribution_time.png` - main hypothesis test
 - `per_peer_completion.png` - individual peer performance
+- `availability_variance.png` - piece availability spread by strategy
 - `free_rider_impact.png` - choking effectiveness
 - `summary.csv` - statistical summary
 

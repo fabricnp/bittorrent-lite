@@ -18,6 +18,34 @@ from . import protocol
 logger = logging.getLogger('peer')
 
 
+class UploadRateLimiter:
+    """Share one upload token bucket across a peer's connections."""
+
+    def __init__(self, rate_limit):
+        self.rate_limit = rate_limit
+        self.tokens = rate_limit
+        self.last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def consume(self, nbytes):
+        if self.rate_limit <= 0:
+            return
+
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self.tokens = min(
+                    self.rate_limit,
+                    self.tokens + (now - self.last_refill) * self.rate_limit,
+                )
+                self.last_refill = now
+                if self.tokens >= nbytes:
+                    self.tokens -= nbytes
+                    return
+                wait = (nbytes - self.tokens) / self.rate_limit
+            await asyncio.sleep(wait)
+
+
 class PeerConnection:
     """One TCP connection to one peer. Every peer gets its own instance, its
     own am_choking/am_interested flags, its own pending request set, etc -
@@ -25,7 +53,7 @@ class PeerConnection:
 
     def __init__(self, peer_id, info_hash, assembler, piece_provider=None,
                  on_piece_complete=None, piece_selector=None, choking_manager=None,
-                 rate_limit=0):
+                 rate_limit=0, upload_limiter=None):
         # rate_limit: max bytes/sec we'll upload to this one peer, 0 = no limit
         self.our_peer_id = peer_id
         self.info_hash = info_hash
@@ -34,6 +62,7 @@ class PeerConnection:
         self.on_piece_complete = on_piece_complete
         self.piece_selector = piece_selector
         self.choking_manager = choking_manager
+        self.upload_limiter = upload_limiter
 
         # connection state
         self.remote_peer_id = None
@@ -49,6 +78,7 @@ class PeerConnection:
 
         # what the remote peer has
         self.peer_bitfield = None
+        self._availability_registered = False
 
         # request tracking
         self.pending_requests = set()  # piece indices we've requested
@@ -198,13 +228,21 @@ class PeerConnection:
         elif msg_id == protocol.MSG_HAVE:
             piece_index = protocol.parse_have(payload)
             if self.peer_bitfield is not None and piece_index < len(self.peer_bitfield):
-                self.peer_bitfield[piece_index] = True
+                if not self.peer_bitfield[piece_index]:
+                    self.peer_bitfield[piece_index] = True
+                    if self.piece_selector and self._availability_registered:
+                        availability = [False] * len(self.peer_bitfield)
+                        availability[piece_index] = True
+                        self.piece_selector.update_availability(availability)
             # check if we need this piece
             if not self.assembler.have[piece_index] and not self.am_interested:
                 await self.send_interested()
 
         elif msg_id == protocol.MSG_BITFIELD:
             self.peer_bitfield = self.assembler.set_bitfield(payload)
+            if self.piece_selector and not self._availability_registered:
+                self.piece_selector.update_availability(self.peer_bitfield)
+                self._availability_registered = True
             # figure out if they have anything we need
             for i, has in enumerate(self.peer_bitfield):
                 if has and not self.assembler.have[i]:
@@ -225,6 +263,9 @@ class PeerConnection:
 
     async def _throttle_upload(self, nbytes):
         """Block until we have enough tokens to send nbytes, if rate limited."""
+        if self.upload_limiter:
+            await self.upload_limiter.consume(nbytes)
+            return
         if self.rate_limit <= 0:
             return
         while True:
@@ -268,6 +309,8 @@ class PeerConnection:
 
         accepted = self.assembler.add_piece(piece_index, data)
         if accepted:
+            if self.choking_manager:
+                self.choking_manager.record_upload(self.remote_peer_id, len(data))
             self.pieces_downloaded += 1
             logger.info(
                 f"Got piece {piece_index} from {self.remote_peer_id} "
@@ -358,6 +401,9 @@ class PeerConnection:
     async def disconnect(self):
         """Close the connection."""
         self.connected = False
+        if self.piece_selector and self._availability_registered:
+            self.piece_selector.remove_peer_availability(self.peer_bitfield)
+            self._availability_registered = False
         if self.writer:
             try:
                 self.writer.close()
