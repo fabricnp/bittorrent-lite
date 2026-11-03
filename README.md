@@ -1,350 +1,96 @@
-# BitTorrent-lite P2P File Distribution System
+# BitTorrent-lite
 
-A peer-to-peer file distribution system built from scratch using Python asyncio and raw TCP sockets. Implements core BitTorrent concepts: tracker server, peer wire protocol, rarest-first piece selection, and choking/unchoking mechanisms.
+This is our CS-30003 Coding Assignment 1 project. We built a small peer-to-peer file transfer system in Python to try out the main ideas behind BitTorrent: a tracker helps peers find each other, peers exchange file pieces over TCP, and the receiver checks each piece before saving it.
 
-## Team Members
+## Team
 
-- **Member A** (Bibek Mishra): Metainfo format, file splitter/assembler, hashing
-- **Member B** (Pravesh Basnet): Tracker server (raw TCP HTTP, announce, swarm state)
-- **Member C** (Saurav Neupane): Peer wire protocol (message framing, handshake, state machine)
-- **Member D** (Sworup Bastola): Piece selection algorithms, choking logic, experiment harness, analysis
+| Member | Name | Main contribution |
+| --- | --- | --- |
+| A | Bibek Mishra | Metainfo, file splitting and assembly, hashing |
+| B | Pravesh Basnet | Tracker and swarm state |
+| C | Saurav Neupane | Peer wire protocol |
+| D | Sworup Bastola | Piece selection, choking, experiments and analysis |
 
-## Project Structure
+## How a transfer works
 
-```
-bittorrent-lite/
-├── src/
-│   ├── metainfo/          # File splitting, hashing, metainfo format (Member A)
-│   │   ├── metainfo.py
-│   │   ├── assembler.py
-│   │   ├── file_splitter.py
-│   │   └── bencode.py
-│   ├── tracker/           # Tracker server implementation (Member B)
-│   │   ├── tracker.py
-│   │   ├── http_request.py
-│   │   └── swarm.py
-│   ├── peer/              # Peer wire protocol (Member C)
-│   │   ├── protocol.py
-│   │   ├── peer_connection.py
-│   │   └── client.py
-│   ├── strategy/          # Piece selection & choking (Member D)
-│   │   ├── piece_selector.py
-│   │   └── choking.py
-│   └── swarm/             # Multi-peer coordination
-│       ├── piece_manager.py
-│       └── scheduler.py
-├── experiments/           # Experiment harness & analysis (Member D)
-│   ├── experiment.py
-│   └── plot_results.py
-├── docs/                  # Protocol specifications
-│   ├── protocol_spec.md   # Main specification (Members B & D)
-│   ├── metainfo_format.md
-│   └── peer_protocol.md
-└── tests/                 # Unit tests
-    └── test_*.py
-```
+1. The file is split into pieces and a SHA-256 hash is saved for each piece.
+2. A seeder announces itself to the tracker.
+3. A leecher asks the tracker for peers, then connects to a seeder directly.
+4. The leecher requests pieces, checks their hashes, and assembles the file.
 
-## Requirements
+The tracker shares peer addresses; file data travels between peers.
 
-- Python 3.12+
-- matplotlib
-- pandas
-- numpy
-- pytest (for tests)
+## Project layout
 
-Install dependencies:
-```bash
-pip install matplotlib pandas numpy pytest
-```
+- **src/metainfo** — metainfo, piece hashing, and file assembly
+- **src/tracker** — HTTP tracker, request parsing, and swarm state
+- **src/peer** — peer messages and connections
+- **src/strategy** — piece selection and choking
+- **src/swarm** — seeding and downloading commands
+- **experiments** — experiment runner and result plots
+- **tests** — protocol, tracker, peer, and transfer tests
+- **docs** — metainfo and protocol notes
 
-## Quick Start
+## Run a small demo
 
-### 1. Run the Tracker
+Run these commands from the repository folder. Use three terminals and leave the tracker and seeder running while the leecher downloads.
 
-Start the tracker server on localhost:8000:
+### Terminal 1: start the tracker
 
-```bash
-python -m src.tracker.tracker --host 127.0.0.1 --port 8000 --interval 30
-```
+~~~powershell
+python -m src.tracker --port 7000
+~~~
 
-Options:
-- `--host`: Bind address (default: 127.0.0.1)
-- `--port`: Port number (default: 8000)
-- `--interval`: Seconds between peer re-announces (default: 30)
-- `--timeout`: Drop quiet peers after N seconds (default: 120)
+The tracker status is available at http://127.0.0.1:7000/stats. It shows an empty swarm until a peer announces.
 
-The tracker provides these endpoints:
-- `GET /announce` - Peer registration and peer list
-- `GET /scrape` - Swarm statistics
-- `GET /stats` - Debug info (all swarms)
+### Terminal 2: prepare the file and start a seeder
 
-### 2. Create a Torrent File
+~~~powershell
+python -m src.metainfo mkfile demo_data/demo.bin 64K --seed 42
+python -c "from src.metainfo.metainfo import create_metainfo, save_metainfo; m=create_metainfo('demo_data/demo.bin', piece_size=4096); save_metainfo(m, 'demo_data/demo.json'); print(f'{m.file_size} bytes, {m.piece_count} pieces')"
+python -m src.swarm.node seed --peer-id seed --swarm-id demo --metainfo demo_data/demo.json --file demo_data/demo.bin
+~~~
 
-Generate metainfo for a file:
+The file is 64 KB and has sixteen 4 KB pieces. The seeder command stays open while it serves the file.
 
-```python
-from src.metainfo import metainfo
+### Terminal 3: download from the seeder
 
-metainfo.generate(
-    file_path='myfile.bin',
-    tracker_url='http://127.0.0.1:8000',
-    piece_length=256 * 1024,  # 256 KB pieces
-    output_path='myfile.torrent'
-)
-```
+~~~powershell
+python -m src.swarm.node leech --peer-id leecher --swarm-id demo --metainfo demo_data/demo.json --pieces-dir demo_data/pieces --output demo_data/downloaded.bin
+~~~
 
-### 3. Run Peers
+The output should show the tracker returning the seeder, a peer handshake, piece requests, and verified pieces. Check that the original and downloaded files match:
 
-#### Seeder (has complete file):
+~~~powershell
+(Get-FileHash demo_data/demo.bin).Hash -eq (Get-FileHash demo_data/downloaded.bin).Hash
+~~~
 
-```python
-from src.peer.client import PeerClient
-from src.strategy.piece_selector import RarestFirst
-from src.strategy.choking import ChokingManager
-import asyncio
+PowerShell should print True. Refresh the tracker status page to see its announce counts. Press Ctrl+C in the seeder and tracker terminals when finished.
 
-client = PeerClient(
-    torrent_path='myfile.torrent',
-    download_dir='./seeder_data',
-    listen_port=6881,
-    peer_id='seeder-1',
-    piece_selector=RarestFirst(),
-    choking_manager=ChokingManager(),
-    is_seeder=True,
-    source_file='myfile.bin',  # Original file
-)
+## Experiments
 
-async def run():
-    await client.start()
-    await client.run_until_complete(timeout=300)
-    await client.stop()
+The experiment runner compares rarest-first, random, and sequential piece selection with different swarm sizes and seeder counts. It also includes a free-rider scenario.
 
-asyncio.run(run())
-```
-
-#### Leecher (downloading):
-
-```python
-client = PeerClient(
-    torrent_path='myfile.torrent',
-    download_dir='./leecher_data',
-    listen_port=6882,
-    peer_id='leecher-1',
-    piece_selector=RarestFirst(),
-    choking_manager=ChokingManager(),
-    is_seeder=False,
-)
-
-async def run():
-    await client.start()
-    await client.run_until_complete(timeout=300)
-    await client.stop()
-
-asyncio.run(run())
-```
-
-## Piece Selection Strategies
-
-Three strategies are implemented (see `src/strategy/piece_selector.py`):
-
-### 1. Rarest-First (`RarestFirst`)
-- Selects the piece held by the fewest peers
-- Improves swarm health by distributing rare pieces quickly
-- **Expected to perform best**
-
-### 2. Random Selection (`RandomSelect`)
-- Picks a random available piece
-- Baseline comparison, no coordination overhead
-
-### 3. Sequential Selection (`SequentialSelect`)
-- Downloads pieces in order (0, 1, 2, ...)
-- Naive approach, **expected to perform worst**
-
-## Choking Algorithm
-
-Implemented in `src/strategy/choking.py`:
-
-- **Regular unchoking**: Every 10s, unchoke the top 4 peers by upload contribution
-- **Optimistic unchoking**: Every 30s, give a random choked peer a chance
-- **Free-rider detection**: Logs peers with zero upload rate
-- **Seeder behavior**: Seeders unchoke all interested peers (altruistic)
-
-## Running Experiments
-
-### Full Experiment Suite
-
-Run all experiments defined in the proposal:
-
-```bash
+~~~powershell
 python -m experiments.experiment
-```
-
-This will:
-1. Create a 100 MB test file
-2. Generate metainfo with 256 KB pieces
-3. Run 5 repetitions of each configuration:
-   - 3 strategies × 2 swarm sizes (6, 8) × 2 seeder counts (1, 2)
-4. Run free-rider experiments (2 non-uploading peers)
-5. Save results to `experiments/results/results.json`
-
-**Note**: Full suite takes ~30-60 minutes to complete.
-
-### Generate Plots
-
-After experiments complete:
-
-```bash
 python -m experiments.plot_results
-```
+~~~
 
-Generates:
-- `distribution_time.png` - Box plots of total distribution time by strategy
-- `per_peer_completion.png` - Individual peer completion times
-- `free_rider_impact.png` - Impact of choking on free-riders
-- `summary.csv` - Statistical summary table
+The full experiment takes longer than the small demo. Its JSON results and plots are written under experiments/results.
 
-## Running Tests
+## Tests
 
-```bash
-# Run all tests
-pytest tests/ -v
+Run the test suite with:
 
-# Run specific test file
-pytest tests/test_protocol.py -v
+~~~powershell
+python -m pytest tests/ -v
+~~~
 
-# Run with coverage
-pytest tests/ --cov=src --cov-report=html
-```
+## Scope
 
-Key test files:
-- `test_protocol.py` - Message encoding/decoding
-- `test_pieces.py` - Piece management
-- `test_tracker.py` - Tracker HTTP protocol
-- `test_transfer.py` - Multi-peer scenarios
-- `test_scheduler.py` - Piece selection
-
-## Documentation
-
-Detailed specifications:
-- **`docs/protocol_spec.md`** - Complete protocol specification (tracker, peer wire, piece selection, choking)
-- **`docs/metainfo_format.md`** - Torrent file format
-- **`docs/peer_protocol.md`** - Peer wire protocol details
-
-## Experimental Hypothesis
-
-**Claim**: Rarest-first piece selection reduces total swarm distribution time compared with random and sequential selection, particularly as swarm size increases.
-
-**Variables**:
-- Independent: strategy, swarm size, seeder count
-- Dependent: distribution time, per-peer completion time, piece availability variance
-
-**Expected Results**:
-1. Rarest-first < Random < Sequential (distribution time)
-2. Larger swarms benefit more from rarest-first
-3. Free-riders have longer completion times due to choking
-
-## Architecture
-
-```
-┌─────────────┐
-│   Tracker   │  HTTP/TCP server, manages swarm membership
-└──────┬──────┘
-       │ announce/peer-list
-       │
-   ┌───┴────────────┐
-   │                │
-┌──▼───┐        ┌───▼──┐
-│Peer A│◄─TCP───►│Peer B│  Wire protocol: handshake, bitfield,
-└──┬───┘        └───┬──┘  request, piece, choke, unchoke
-   │                │
-   │  ┌──────────┐  │
-   └─►│  Pieces  │◄─┘     FileAssembler: verify & write pieces
-      └──────────┘
-```
-
-**Each peer has**:
-- **PeerClient**: Orchestrates tracker communication and peer connections
-- **PeerConnection**: Manages one TCP connection (state machine)
-- **FileAssembler**: Validates and stores received pieces
-- **PieceSelector**: Chooses which piece to request next
-- **ChokingManager**: Decides which peers to unchoke
-
-## Key Features
-
-✅ **From Scratch**: Raw TCP sockets (no HTTP library for tracker)  
-✅ **Async**: Python asyncio for concurrent peer connections  
-✅ **Verified**: SHA-256 per-piece and whole-file verification  
-✅ **Pipelined**: Up to 5 outstanding requests per peer  
-✅ **Rate Limited**: Token bucket algorithm for fair experiments  
-✅ **Instrumented**: Comprehensive logging and statistics  
-
-## Limitations
-
-- **Localhost only**: No NAT traversal or DHT
-- **No encryption**: Plain TCP
-- **Single file**: No multi-file torrents
-- **Simplified protocol**: No endgame mode, port, or extended messages
-- **No persistence**: Peers don't resume interrupted downloads
-
-## Performance Notes
-
-- **Piece size**: 256 KB balances hash overhead vs. granularity
-- **Max connections**: 6-8 peers (typical for local experiments)
-- **Pipeline depth**: 5 requests (balances throughput vs. fairness)
-- **Choking intervals**: 10s regular, 30s optimistic (standard BitTorrent)
-
-## Troubleshooting
-
-### "No module named pytest"
-```bash
-pip install pytest
-```
-
-### "Address already in use"
-Change port numbers or wait for old processes to release ports:
-```bash
-# Find process using port 8000
-lsof -i :8000
-# Kill it
-kill -9 <PID>
-```
-
-### "Connection refused" when peer tries to connect
-Make sure tracker is running first.
-
-### Experiments hang
-- Check if any peers crashed (check logs)
-- Reduce timeout in experiment config
-- Start with smaller swarm (2-3 peers) for debugging
-
-### Import errors
-Make sure you're running from the repository root:
-```bash
-cd /path/to/bittorrent-lite
-python -m experiments.experiment
-```
-
-## Contributing
-
-This is a course project. Contributions are structured by team member responsibilities as defined in the proposal.
-
-## License
-
-Academic project for CS-30003 Coding Assignment 1.
+This is a teaching project, not a full BitTorrent client. It handles single-file transfers over local TCP connections. It does not implement DHT, NAT traversal, encryption, or multi-file torrents.
 
 ## References
 
-- [BitTorrent Protocol Specification](http://www.bittorrent.org/beps/bep_0003.html)
-- [BitTorrent Economics Paper](http://bittorrent.org/bittorrentecon.pdf) (rarest-first analysis)
-- Python asyncio documentation
-
----
-
-**Status**: ✅ Complete and ready for experiments
-
-All Member D deliverables implemented:
-- ✅ Piece selection algorithms (3 strategies)
-- ✅ Choking/unchoking logic
-- ✅ Experiment harness
-- ✅ Plotting and analysis
-- ✅ Protocol specification (Section 3)
+- [BitTorrent protocol specification](https://www.bittorrent.org/beps/bep_0003.html)
+- [Python asyncio documentation](https://docs.python.org/3/library/asyncio.html)
