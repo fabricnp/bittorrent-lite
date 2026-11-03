@@ -27,13 +27,34 @@ def run_seeder(args):
 
     print(f"[SEEDER] {args.peer_id} serving on {args.host}:{port}")
 
+    stop_announcing = threading.Event()
+
+    def keep_tracker_registration():
+        while not stop_announcing.wait(30):
+            try:
+                tracker.register(args.swarm_id, args.peer_id, args.host, port)
+            except TrackerError as exc:
+                print(f"[SEEDER] Tracker refresh failed: {exc}")
+
+    announce_thread = threading.Thread(
+        target=keep_tracker_registration,
+        name="tracker-announce",
+        daemon=True,
+    )
+    announce_thread.start()
+
     try:
-        threading.Event().wait()
+        while not stop_announcing.wait(0.5):
+            pass
     except KeyboardInterrupt:
         print("\n[SEEDER] Shutting down")
     finally:
-        tracker.unregister(args.swarm_id, args.peer_id)
-        server.stop()
+        stop_announcing.set()
+        announce_thread.join(timeout=1)
+        try:
+            tracker.unregister(args.swarm_id, args.peer_id)
+        finally:
+            server.stop()
 
 
 def run_leecher(args):

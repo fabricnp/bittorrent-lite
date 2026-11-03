@@ -38,6 +38,7 @@ class TrackerClient:
             peer_id=peer_id,
             port=port,
             event="started",
+            left=0,
         )
 
         return reply
@@ -125,7 +126,7 @@ class TrackerClient:
 
         return True
 
-    def _announce(self, info_hash, peer_id, port, event=""):
+    def _announce(self, info_hash, peer_id, port, event="", left=None):
         """
         Send an HTTP GET /announce request using the standard library.
 
@@ -153,6 +154,8 @@ class TrackerClient:
             "port": int(port),
             "event": event,
         }
+        if left is not None:
+            params["left"] = int(left)
 
         query = urlencode(params)
         request = (

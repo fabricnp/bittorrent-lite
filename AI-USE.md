@@ -8,6 +8,8 @@
 
 I used ChatGPT during development of the codebase to review implementation, find integration problems, and suggest code fixes. I also used it to draft and revise the README and project documentation. I checked the suggestions against the repository and kept or adapted the ones that fit the project.
 
+During the demo, the tracker stopped listing a seeder after its announce expired, and Ctrl+C did not stop the seeder process in Windows. ChatGPT helped me trace both problems. I updated the seeder to refresh its tracker entry every 30 seconds and identify itself as a seeder, then changed its shutdown wait so Windows can handle Ctrl+C. I confirmed the shutdown behavior manually and ran the full test suite; all 277 tests passed.
+
 ## Reference material
 
 These sources were checked during AI-assisted review of the metainfo and hashing implementation. The BitTorrent specification describes the standard protocol; this class project is simplified and uses SHA-256 for piece hashes.
