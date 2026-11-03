@@ -69,7 +69,7 @@ def plot_distribution_time(results, output_dir='experiments/results'):
             data.append(s_data)
             labels.append(strategy.replace('_', '\n'))
 
-        bp = ax.boxplot(data, labels=labels, patch_artist=True)
+        bp = ax.boxplot(data, tick_labels=labels, patch_artist=True)
         colors = ['#4CAF50', '#2196F3', '#FF9800']
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
@@ -122,7 +122,7 @@ def plot_per_peer_completion(results, output_dir='experiments/results'):
             data.append(vals)
             labels.append(s.replace('_', '\n'))
 
-        bp = ax.boxplot(data, labels=labels, patch_artist=True)
+        bp = ax.boxplot(data, tick_labels=labels, patch_artist=True)
         colors = ['#4CAF50', '#2196F3', '#FF9800']
         for patch, c in zip(bp['boxes'], colors):
             patch.set_facecolor(c)
@@ -163,7 +163,7 @@ def plot_piece_availability_variance(results, output_dir='experiments/results'):
         return
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    bp = ax.boxplot(data, tick_labels=labels, patch_artist=True)
     for patch, color in zip(bp['boxes'], ['#4CAF50', '#2196F3', '#FF9800']):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
@@ -201,7 +201,7 @@ def plot_free_rider_results(results, output_dir='experiments/results'):
     fig, ax = plt.subplots(figsize=(8, 6))
 
     data = [normal_times, freerider_times]
-    bp = ax.boxplot(data, labels=['Normal Peers', 'Free Riders'], patch_artist=True)
+    bp = ax.boxplot(data, tick_labels=['Normal Peers', 'Free Riders'], patch_artist=True)
     bp['boxes'][0].set_facecolor('#4CAF50')
     bp['boxes'][0].set_alpha(0.7)
     bp['boxes'][1].set_facecolor('#F44336')

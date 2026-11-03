@@ -385,6 +385,9 @@ Results are analyzed and plotted as:
 ### 4.4 Running Experiments
 
 ```bash
+# Install the plotting packages first
+python -m pip install -r requirements.txt
+
 # Run full experiment suite
 python -m experiments.experiment
 
@@ -397,7 +400,7 @@ Results are saved to `experiments/results/`:
 - `distribution_time.png` - main hypothesis test
 - `per_peer_completion.png` - individual peer performance
 - `availability_variance.png` - piece availability spread by strategy
-- `free_rider_impact.png` - choking effectiveness
+- `free_rider_impact.png` - free-rider completion-time comparison
 - `summary.csv` - statistical summary
 
 ---

@@ -72,6 +72,7 @@ PowerShell should print True. Refresh the tracker status page to see its announc
 The experiment runner compares rarest-first, random, and sequential piece selection with different swarm sizes and seeder counts. It records completion time and piece-availability variance, and includes a free-rider scenario.
 
 ~~~powershell
+python -m pip install -r requirements.txt
 python -m experiments.experiment
 python -m experiments.plot_results
 ~~~

@@ -14,6 +14,7 @@ original file and verifies it in place.
 
 import logging
 import os
+import time
 
 from .file_splitter import verify_piece, compute_file_hash, num_pieces_for, piece_size
 
@@ -296,7 +297,14 @@ class FileAssembler:
                 self.recheck()
                 raise RuntimeError("file hash mismatch after assembly")
 
-        os.replace(self.part_path, output_path)
+        for attempt in range(10):
+            try:
+                os.replace(self.part_path, output_path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1)
         self.final_path = output_path
         self.assembled = True
         log.info("assembled %s (%d bytes)", output_path, self.file_length)
