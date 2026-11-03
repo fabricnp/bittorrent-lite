@@ -29,7 +29,7 @@ The tracker shares peer addresses; file data travels between peers.
 - **src/swarm** — seeding and downloading commands
 - **experiments** — experiment runner and result plots
 - **tests** — protocol, tracker, peer, and transfer tests
-- **docs** — metainfo and protocol notes
+- **docs** — metainfo and protocol notes, plus the project proposal
 
 ## Run a small demo
 
